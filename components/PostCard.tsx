@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent,
+} from "react";
 import { useRouter } from "next/navigation";
 import api, { getAccessToken } from "@/lib/api";
 import CommentThread, { Comment } from "@/components/CommentThread";
@@ -62,11 +67,7 @@ export interface Post {
   repo_url?: string | null;
   tech_stack?: string | null;
   comments_count?: number;
-  // NEW: images for gallery
   images?: { url: string; position: number }[];
-  // NEW: whether current user follows the author:
-  //  - true / false when logged in and NOT the author
-  //  - null when unauthenticated OR when current user is the author
   is_author_followed?: boolean | null;
 }
 
@@ -100,7 +101,7 @@ function resolveMediaUrl(path?: string | null): string | null {
 export default function PostCard({ post }: { post: Post }) {
   const router = useRouter();
 
-  const [score, setScore] = useState(post.score ?? 0);
+  const [score, setScore] = useState<number>(post.score ?? 0);
   const [myVote, setMyVote] = useState<number>(post.my_vote ?? 0);
 
   // comments
@@ -117,19 +118,18 @@ export default function PostCard({ post }: { post: Post }) {
   // show more
   const [bodyExpanded, setBodyExpanded] = useState(false);
 
-  // 🔐 login modal state
+  // login modal
   const [showLoginModal, setShowLoginModal] = useState(false);
 
-  // 📋 “copy link” state
+  // copy link state
   const [copied, setCopied] = useState(false);
 
-  // 👤 author follow state (tri-state: true / false / null)
-  const [isAuthorFollowed, setIsAuthorFollowed] = useState<
-    boolean | null | undefined
-  >(post.is_author_followed);
+  // author follow state
+  const [isAuthorFollowed, setIsAuthorFollowed] =
+    useState<boolean | null | undefined>(post.is_author_followed);
   const [authorFollowBusy, setAuthorFollowBusy] = useState(false);
 
-  // 🖼️ gallery state (for multiple images)
+  // gallery
   const [activeImageIndex, setActiveImageIndex] = useState(0);
 
   const created = new Date(post.created_at).toLocaleString();
@@ -154,7 +154,7 @@ export default function PostCard({ post }: { post: Post }) {
       ? post.comments_count
       : comments.length;
 
-  // ✅ body truncation logic
+  // body truncation
   const BODY_LIMIT = 320;
   const { previewBody, isLongBody } = useMemo(() => {
     const txt = post.body || "";
@@ -170,7 +170,7 @@ export default function PostCard({ post }: { post: Post }) {
   const thumbUrl = resolveMediaUrl(post.thumbnail_url);
   const authorAvatar = resolveMediaUrl(post.author.avatar_url);
 
-  // 🖼️ Normalised gallery images (sorted by position)
+  // gallery images
   const galleryImages = useMemo(() => {
     if (!Array.isArray(post.images) || post.images.length === 0) {
       return [] as string[];
@@ -182,12 +182,10 @@ export default function PostCard({ post }: { post: Post }) {
       .filter((u): u is string => !!u);
   }, [post.images]);
 
-  // Decide which image to show as the main media
   const mainImageUrl =
     galleryImages[activeImageIndex] ?? galleryImages[0] ?? thumbUrl ?? null;
 
   useEffect(() => {
-    // clamp index if gallery size changes
     if (galleryImages.length === 0 && activeImageIndex !== 0) {
       setActiveImageIndex(0);
     } else if (activeImageIndex >= galleryImages.length) {
@@ -195,7 +193,7 @@ export default function PostCard({ post }: { post: Post }) {
     }
   }, [galleryImages.length, activeImageIndex]);
 
-  // 🌐 Share URL + title
+  // share URL
   const shareUrl =
     (typeof window !== "undefined" &&
       `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}/post/${
@@ -222,32 +220,49 @@ export default function PostCard({ post }: { post: Post }) {
     }
   };
 
+  /**
+   * 🔼 / 🔽 VOTING
+   *  - Same behaviour as the working post detail page
+   *  - Sends { value: -1 | 0 | 1 } to /posts/{id}/vote
+   *  - Optimistic UI with rollback on error
+   */
   const handleVote = async (value: 1 | -1) => {
-    // 🔐 check if user is logged in before voting
     const token = getAccessToken();
     if (!token) {
+      // not logged in → show modal and do NOT change UI
       openLoginModal();
       return;
     }
 
+    const previousVote = myVote;
+    const previousScore = score;
+
+    let nextVote: -1 | 0 | 1;
+    let nextScore: number;
+
+    if (myVote === value) {
+      // undo existing vote
+      nextVote = 0;
+      nextScore = score - value;
+    } else {
+      // new or changed vote
+      nextVote = value;
+      nextScore = score - myVote + value;
+    }
+
+    // optimistic UI update
+    setMyVote(nextVote);
+    setScore(nextScore);
+
     try {
-      let nextVote: 1 | -1 | 0 = value;
-      let nextScore = score;
-
-      if (myVote === value) {
-        nextVote = 0; // undo same vote
-        nextScore = score - value;
-      } else {
-        nextScore = score - myVote + value;
-      }
-
-      // optimistic update
-      setMyVote(nextVote);
-      setScore(nextScore);
-
       await api.post(`/posts/${post.id}/vote`, { value: nextVote });
     } catch (e: any) {
-      console.error(e);
+      console.error("Vote error:", e?.response?.data || e);
+
+      // rollback UI
+      setMyVote(previousVote);
+      setScore(previousScore);
+
       if (e?.response?.status === 401) {
         openLoginModal();
       }
@@ -317,8 +332,6 @@ export default function PostCard({ post }: { post: Post }) {
     router.push("/auth/login");
   };
 
-  // 🔔 Show follow button only when backend gave us a boolean
-  // (true/false = logged in & not the author; null/undefined = hide)
   const showAuthorFollowButton =
     typeof isAuthorFollowed === "boolean" && !!post.author.username;
 
@@ -353,7 +366,7 @@ export default function PostCard({ post }: { post: Post }) {
 
   const hasSlider = galleryImages.length > 1;
 
-  const goPrevImage = (e: React.MouseEvent) => {
+  const goPrevImage = (e: MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     if (!hasSlider) return;
@@ -362,7 +375,7 @@ export default function PostCard({ post }: { post: Post }) {
     );
   };
 
-  const goNextImage = (e: React.MouseEvent) => {
+  const goNextImage = (e: MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     if (!hasSlider) return;
@@ -373,9 +386,9 @@ export default function PostCard({ post }: { post: Post }) {
 
   return (
     <>
-      {/* Card container – slightly tighter padding on mobile, full width */}
+      {/* Card */}
       <div className="w-full px-2.5 py-2.5 sm:px-3 sm:py-3 rounded-xl bg-slate-950/60 hover:bg-slate-900/70 border border-slate-800 shadow-[0_18px_40px_rgba(15,23,42,0.85)] transition-colors duration-200">
-        {/* Header row – mobile-friendly wrapping */}
+        {/* Header */}
         <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mb-1">
           {authorAvatar ? (
             <img
@@ -389,7 +402,6 @@ export default function PostCard({ post }: { post: Post }) {
             </div>
           )}
 
-          {/* Username + meta */}
           <div className="flex flex-wrap items-center gap-1.5 min-w-0 flex-1">
             {post.author.username ? (
               <Link
@@ -428,7 +440,6 @@ export default function PostCard({ post }: { post: Post }) {
             )}
           </div>
 
-          {/* 🔔 Follow / Following pill – drops below on very small screens */}
           {showAuthorFollowButton && (
             <button
               type="button"
@@ -466,14 +477,14 @@ export default function PostCard({ post }: { post: Post }) {
           )}
         </div>
 
-        {/* Title – looser clamp on mobile */}
+        {/* Title */}
         <Link href={`/post/${post.slug}`}>
           <h2 className="text-[14px] sm:text-[15px] font-semibold text-slate-50 hover:text-primary-300 transition-colors line-clamp-3 sm:line-clamp-2">
             {post.title}
           </h2>
         </Link>
 
-        {/* 🖼️ Media area with optional slider – FULL IMAGE, no cropping */}
+        {/* Media */}
         {mainImageUrl && (
           <div className="mt-2">
             <Link
@@ -490,7 +501,6 @@ export default function PostCard({ post }: { post: Post }) {
 
                 {hasSlider && (
                   <>
-                    {/* Prev */}
                     <button
                       type="button"
                       onClick={goPrevImage}
@@ -500,7 +510,6 @@ export default function PostCard({ post }: { post: Post }) {
                       <ChevronLeft className="w-4 h-4" />
                     </button>
 
-                    {/* Next */}
                     <button
                       type="button"
                       onClick={goNextImage}
@@ -510,7 +519,6 @@ export default function PostCard({ post }: { post: Post }) {
                       <ChevronRight className="w-4 h-4" />
                     </button>
 
-                    {/* Dots */}
                     <div className="pointer-events-none absolute bottom-2 left-0 right-0 flex justify-center gap-1.5">
                       {galleryImages.map((_, idx) => (
                         <span
@@ -558,7 +566,7 @@ export default function PostCard({ post }: { post: Post }) {
                 href={post.repo_url}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1 hover:text-primary-300"
+                className="inline-flex items(center) gap-1 hover:text-primary-300"
               >
                 <FolderGit2 className="w-3.5 h-3.5" />
                 Repo
@@ -573,26 +581,11 @@ export default function PostCard({ post }: { post: Post }) {
           </div>
         )}
 
-        {/* 🚫 Tags (hidden for PostCard section as requested)
-        {post.tags.length > 0 && (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10.5px]">
-            {post.tags.map((tag) => (
-              <span
-                key={tag.id}
-                className="px-2 py-[2px] rounded-full bg-slate-950 border border-slate-800 text-slate-200 hover:border-primary-500/40 transition-colors"
-              >
-                #{tag.slug}
-              </span>
-            ))}
-          </div>
-        )} */}
-
-        {/* 🌐 Social sharing row */}
+        {/* Social share */}
         {shareUrl && (
           <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
             <span className="mr-1 text-slate-500">Share:</span>
 
-            {/* Facebook */}
             <FacebookShareButton
               url={shareUrl}
               hashtag="#PwnTrends"
@@ -601,7 +594,6 @@ export default function PostCard({ post }: { post: Post }) {
               <FaFacebookF className="w-3.5 h-3.5 text-blue-300" />
             </FacebookShareButton>
 
-            {/* LinkedIn */}
             <LinkedinShareButton
               url={shareUrl}
               title={shareTitle}
@@ -610,7 +602,6 @@ export default function PostCard({ post }: { post: Post }) {
               <FaLinkedinIn className="w-3.5 h-3.5 text-sky-300" />
             </LinkedinShareButton>
 
-            {/* Reddit */}
             <RedditShareButton
               url={shareUrl}
               title={shareTitle}
@@ -619,7 +610,6 @@ export default function PostCard({ post }: { post: Post }) {
               <FaRedditAlien className="w-3.5 h-3.5 text-orange-300" />
             </RedditShareButton>
 
-            {/* Instagram-style: copy link */}
             <button
               type="button"
               onClick={handleCopyLink}
@@ -629,7 +619,6 @@ export default function PostCard({ post }: { post: Post }) {
               <FaInstagram className="w-3.5 h-3.5 text-pink-300" />
             </button>
 
-            {/* Quora – open share URL */}
             <a
               href={quoraShareUrl}
               target="_blank"
@@ -648,9 +637,8 @@ export default function PostCard({ post }: { post: Post }) {
           </div>
         )}
 
-        {/* ✅ Footer actions with ICON-ONLY Upvote / Downvote */}
+        {/* Footer actions incl. live-updating vote counter */}
         <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
-          {/* Vote group */}
           <div className="inline-flex items-center rounded-full border border-slate-800 bg-slate-950/60 overflow-hidden">
             <button
               type="button"
@@ -683,7 +671,6 @@ export default function PostCard({ post }: { post: Post }) {
             </button>
           </div>
 
-          {/* Comments toggle */}
           <button
             type="button"
             onClick={() => setShowComments((v) => !v)}
@@ -698,13 +685,11 @@ export default function PostCard({ post }: { post: Post }) {
             )}
           </button>
 
-          {/* Views */}
           <span className="inline-flex items-center gap-1.5">
             <Eye className="w-4 h-4" />
             {post.view_count} views
           </span>
 
-          {/* Open */}
           <Link
             href={`/post/${post.slug}`}
             className="ml-auto text-primary-300 hover:text-primary-200"
@@ -713,10 +698,9 @@ export default function PostCard({ post }: { post: Post }) {
           </Link>
         </div>
 
-        {/* Comments */}
+        {/* Comments section */}
         {showComments && (
           <div className="mt-3 pt-3 border-t border-slate-800 space-y-3">
-            {/* Add comment */}
             <div className="space-y-2">
               <textarea
                 className="w-full text-[12px] rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary-500"
@@ -745,7 +729,6 @@ export default function PostCard({ post }: { post: Post }) {
               </div>
             </div>
 
-            {/* Thread */}
             {commentsLoading && (
               <p className="text-[12px] text-slate-500">Loading comments…</p>
             )}
@@ -763,7 +746,7 @@ export default function PostCard({ post }: { post: Post }) {
         )}
       </div>
 
-      {/* 🔐 Modern login modal */}
+      {/* Login modal */}
       {showLoginModal && (
         <div className="fixed inset-0 z-40 flex items-center justify-center px-4 py-6 bg-black/60 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-2xl bg-slate-950 border border-slate-800 shadow-2xl p-5 relative">
